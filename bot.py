@@ -1,64 +1,35 @@
 import os
-import json
-import logging
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ================= CONFIG =================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-
-logging.basicConfig(level=logging.INFO)
+TOKEN = os.environ.get("BOT_TOKEN")
 
 app = Flask(__name__)
+application = Application.builder().token(TOKEN).build()
 
-telegram_app = Application.builder().token(BOT_TOKEN).build()
-
-# ================= COMMAND =================
+# ===== COMMAND =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✅ Bot VCARD aktif!\nGunakan perintah:\n/vcard 100"
-    )
+    await update.message.reply_text("🤖 Bot VCARD aktif 24 jam (Render FREE)")
 
 async def vcard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        total = int(context.args[0])
-    except:
-        await update.message.reply_text("❌ Contoh benar: /vcard 100")
-        return
+    await update.message.reply_text("📇 Request diterima")
 
-    await update.message.reply_text(
-        f"⏳ Permintaan diterima\nSedang memproses {total} nomor..."
-    )
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("vcard", vcard))
 
-    # SIMULASI BERHASIL
-    await update.message.reply_text(
-        "✅ Selesai!\nFile VCARD sudah dikirim via japri."
-    )
-
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("vcard", vcard))
-
-# ================= WEBHOOK =================
-@app.route("/", methods=["POST"])
+# ===== WEBHOOK =====
+@app.route("/webhook", methods=["POST"])
 async def webhook():
-    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    await telegram_app.process_update(update)
-    return "OK"
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    await application.process_update(update)
+    return "ok"
 
-@app.route("/", methods=["GET"])
+@app.route("/")
 def index():
-    return "VCARD BOT RUNNING"
+    return "Bot running"
 
-# ================= MAIN =================
 if __name__ == "__main__":
-    telegram_app.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000)),
-        webhook_url=WEBHOOK_URL,
-    )
+    application.initialize()
+    application.start()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
