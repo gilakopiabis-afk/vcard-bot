@@ -1,35 +1,30 @@
 import os
+import json
 from flask import Flask, request
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Bot, Update
+from telegram.ext import Dispatcher, MessageHandler, Filters
 
 TOKEN = os.environ.get("BOT_TOKEN")
 
+bot = Bot(token=TOKEN)
+
 app = Flask(__name__)
-application = Application.builder().token(TOKEN).build()
+dispatcher = Dispatcher(bot, None, workers=0)
 
-# ===== COMMAND =====
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Bot VCARD aktif 24 jam (Render FREE)")
+def handle_message(update, context):
+    update.message.reply_text("Bot vCard aktif 24 jam ✅")
 
-async def vcard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📇 Request diterima")
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("vcard", vcard))
+@app.route("/", methods=["GET"])
+def index():
+    return "Bot is running 🚀"
 
-# ===== WEBHOOK =====
 @app.route("/webhook", methods=["POST"])
-async def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    await application.process_update(update)
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
     return "ok"
 
-@app.route("/")
-def index():
-    return "Bot running"
-
 if __name__ == "__main__":
-    application.initialize()
-    application.start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
