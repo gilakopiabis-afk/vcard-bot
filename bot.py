@@ -1,30 +1,34 @@
 import os
-import json
 from flask import Flask, request
-from telegram import Bot, Update
-from telegram.ext import Dispatcher, MessageHandler, Filters
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 TOKEN = os.environ.get("BOT_TOKEN")
-
-bot = Bot(token=TOKEN)
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "secret")
+PORT = int(os.environ.get("PORT", 10000))
 
 app = Flask(__name__)
-dispatcher = Dispatcher(bot, None, workers=0)
+application = ApplicationBuilder().token(TOKEN).build()
 
-def handle_message(update, context):
-    update.message.reply_text("Bot vCard aktif 24 jam ✅")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Bot vCard aktif 24 jam di Render!")
 
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+application.add_handler(CommandHandler("start", start))
 
-@app.route("/", methods=["GET"])
-def index():
-    return "Bot is running 🚀"
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    dispatcher.process_update(update)
+@app.post(f"/{WEBHOOK_SECRET}")
+async def webhook():
+    data = request.get_json(force=True)
+    await application.process_update(Update.de_json(data, application.bot))
     return "ok"
 
+@app.get("/")
+def index():
+    return "Bot is running"
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=WEBHOOK_SECRET,
+        webhook_url=os.environ["RENDER_EXTERNAL_URL"] + "/" + WEBHOOK_SECRET,
+    )
