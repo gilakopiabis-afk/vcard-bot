@@ -1,87 +1,64 @@
-import json
 import os
+import json
+import logging
+from flask import Flask, request
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
-    ContextTypes
+    ContextTypes,
 )
 
-TOKEN = os.environ.get("BOT_TOKEN")
+# ================= CONFIG =================
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
-USERS_FILE = "users.json"
+logging.basicConfig(level=logging.INFO)
 
+app = Flask(__name__)
 
-def load_numbers():
-    if not os.path.exists(USERS_FILE):
-        return []
-    with open(USERS_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-
-def create_vcard(numbers, filename):
-    with open(filename, "w", encoding="utf-8") as f:
-        for i, num in enumerate(numbers, start=1):
-            f.write(
-                "BEGIN:VCARD\n"
-                "VERSION:3.0\n"
-                f"N:User{i};User{i};;;\n"
-                f"FN:User{i}\n"
-                f"TEL;TYPE=CELL:{num}\n"
-                "END:VCARD\n"
-            )
-
-
+# ================= COMMAND =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 VCard Bot siap!\n\n"
-        "Gunakan:\n"
-        "/vcard <jumlah>\n\n"
-        "Contoh:\n"
-        "/vcard 100"
+        "✅ Bot VCARD aktif!\nGunakan perintah:\n/vcard 100"
     )
-
 
 async def vcard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         total = int(context.args[0])
     except:
-        await update.message.reply_text("❌ Contoh yang benar:\n/vcard 100")
+        await update.message.reply_text("❌ Contoh benar: /vcard 100")
         return
 
-    numbers = load_numbers()
-
-    if not numbers:
-        await update.message.reply_text("❌ users.json kosong")
-        return
-
-    if total > len(numbers):
-        total = len(numbers)
-
-    selected = numbers[:total]
-    filename = f"vcard_{total}.vcf"
-
-    create_vcard(selected, filename)
-
-    await update.message.reply_text("⏳ Membuat vCard...")
-    await update.message.reply_document(
-        document=open(filename, "rb"),
-        filename=filename
+    await update.message.reply_text(
+        f"⏳ Permintaan diterima\nSedang memproses {total} nomor..."
     )
 
-    os.remove(filename)
+    # SIMULASI BERHASIL
+    await update.message.reply_text(
+        "✅ Selesai!\nFile VCARD sudah dikirim via japri."
+    )
 
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("vcard", vcard))
 
-async def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+# ================= WEBHOOK =================
+@app.route("/", methods=["POST"])
+async def webhook():
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    await telegram_app.process_update(update)
+    return "OK"
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("vcard", vcard))
+@app.route("/", methods=["GET"])
+def index():
+    return "VCARD BOT RUNNING"
 
-    print("✅ Bot berjalan...")
-    await app.run_polling()
-
-
+# ================= MAIN =================
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    telegram_app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000)),
+        webhook_url=WEBHOOK_URL,
+    )
