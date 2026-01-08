@@ -74,6 +74,7 @@ const jwt = new JWT({
   ],
 });
 
+// doc.sheetsApi available after auth by passing jwt
 const doc = new GoogleSpreadsheet(SPREADSHEET_ID, jwt);
 
 async function getSheet() {
@@ -85,41 +86,55 @@ async function getSheet() {
   return sheet;
 }
 
-// ===== Convert column number -> letters (1->A, 2->B, 27->AA) =====
-function colToLetter(colNum) {
-  let temp = colNum;
-  let letter = "";
-  while (temp > 0) {
-    let mod = (temp - 1) % 26;
-    letter = String.fromCharCode(65 + mod) + letter;
-    temp = Math.floor((temp - mod) / 26);
-  }
-  return letter;
+// ===== sleep helper =====
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ===== Get & delete numbers (ANTI QUOTA: delete rows in 1 call) =====
+// ===== Get & delete numbers (READ then BATCH DELETE rows) =====
 async function getAndDeleteNumbers(totalNeeded) {
   const sheet = await getSheet();
 
-  // Column range based on DB_COLUMN
-  const colLetter = colToLetter(DB_COLUMN);
-  const range = `${colLetter}1:${colLetter}${totalNeeded}`;
+  // READ: ambil row pertama sampai totalNeeded
+  const rows = await sheet.getRows({ limit: totalNeeded });
+  if (rows.length < totalNeeded) return [];
 
-  // Read the cells in one go
-  await sheet.loadCells(range);
-
+  const colIndex = DB_COLUMN - 1;
   const picked = [];
+
   for (let i = 0; i < totalNeeded; i++) {
-    const cell = sheet.getCell(i, DB_COLUMN - 1);
-    const val = (cell.value || "").toString().trim();
-    if (!val) {
-      return [];
-    }
+    const r = rows[i];
+
+    // raw data approach (fast)
+    const valueFromArray =
+      Array.isArray(r._rawData) && r._rawData.length > colIndex
+        ? r._rawData[colIndex]
+        : null;
+
+    const val = (valueFromArray || "").toString().trim();
+    if (!val) return [];
     picked.push(val);
   }
 
-  // Delete rows in one call (hemat quota)
-  await sheet.deleteRows(1, totalNeeded);
+  // WRITE: delete first N rows in ONE request using Sheets API batchUpdate
+  // startIndex 0 = row 1, endIndex = totalNeeded (exclusive)
+  await doc.sheetsApi.spreadsheets.batchUpdate({
+    spreadsheetId: SPREADSHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          deleteDimension: {
+            range: {
+              sheetId: sheet.sheetId,
+              dimension: "ROWS",
+              startIndex: 0,
+              endIndex: totalNeeded,
+            },
+          },
+        },
+      ],
+    },
+  });
 
   return picked;
 }
@@ -127,6 +142,7 @@ async function getAndDeleteNumbers(totalNeeded) {
 // ===== Create VALID vCard =====
 function createVcard(numbers, filename, letter) {
   let content = "";
+
   numbers.forEach((num, idx) => {
     const name = `${letter} ${String(idx + 1).padStart(3, "0")}`;
     content +=
@@ -139,11 +155,6 @@ function createVcard(numbers, filename, letter) {
   });
 
   fs.writeFileSync(filename, content, "utf-8");
-}
-
-// ===== sleep helper =====
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ===== /start =====
@@ -166,7 +177,6 @@ bot.command("vcard", async (ctx) => {
   const user = ctx.from;
   const parts = (ctx.message.text || "").split(" ").filter(Boolean);
 
-  // Expect: /vcard 2 300
   if (parts.length !== 3) {
     await ctx.reply("❌ Format: /vcard <jumlah_file> <isi_per_file>");
     return;
@@ -184,14 +194,13 @@ bot.command("vcard", async (ctx) => {
     return;
   }
 
-  // must /start first so bot can DM user
+  // Must start bot in DM first to allow sending files
   if (!users[String(user.id)]) {
     await ctx.reply("❌ Chat bot dulu via japri kirim /start");
     return;
   }
 
   const totalNeeded = fileCount * perFile;
-
   await ctx.reply("⏳ Otw proses, wait ye...");
 
   let numbers = [];
@@ -237,7 +246,7 @@ bot.command("vcard", async (ctx) => {
       fs.unlinkSync(filename);
     } catch {}
 
-    // kasih jeda dikit biar aman kalau kirim banyak file
+    // small delay to avoid Telegram flood limits
     await sleep(300);
   }
 
@@ -246,7 +255,7 @@ bot.command("vcard", async (ctx) => {
 
 // ===== RUN BOT =====
 bot.launch().then(() => {
-  console.log("🟢 VCARD BOT + WEB SERVICE BERJALAN (FINAL ANTI-QUOTA READY)");
+  console.log("🟢 VCARD BOT + WEB SERVICE BERJALAN (FINAL BATCH DELETE READY)");
 });
 
 // Graceful stop
