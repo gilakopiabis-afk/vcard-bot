@@ -5,6 +5,7 @@ const express = require("express");
 const { Telegraf } = require("telegraf");
 const { GoogleSpreadsheet } = require("google-spreadsheet");
 const { JWT } = require("google-auth-library");
+const { google } = require("googleapis");
 
 // ================= CONFIG (Render Env) =================
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -51,20 +52,21 @@ function saveUsers() {
   }
 }
 
-// ===== Google Sheets (JWT Auth) =====
+// ===== Google Credentials =====
 let creds = {};
 try {
   creds = JSON.parse(GOOGLE_CREDS_JSON);
-} catch (e) {
-  throw new Error("❌ GOOGLE_CREDS_JSON bukan JSON valid. Pastikan paste credentials.json full.");
+} catch {
+  throw new Error("❌ GOOGLE_CREDS_JSON bukan JSON valid. Paste credentials.json full.");
 }
 
-// FIX: Render env kadang simpan newline jadi \\n + ada \r
+// FIX: newline sering berubah di env Render
 if (creds.private_key) {
   creds.private_key = creds.private_key.replace(/\\n/g, "\n");
   creds.private_key = creds.private_key.replace(/\r/g, "");
 }
 
+// ===== JWT Auth =====
 const jwt = new JWT({
   email: creds.client_email,
   key: creds.private_key,
@@ -74,9 +76,13 @@ const jwt = new JWT({
   ],
 });
 
-// doc.sheetsApi available after auth by passing jwt
+// ===== google-spreadsheet doc (untuk read rows) =====
 const doc = new GoogleSpreadsheet(SPREADSHEET_ID, jwt);
 
+// ===== googleapis sheets client (untuk batchUpdate delete rows) =====
+const sheetsApi = google.sheets({ version: "v4", auth: jwt });
+
+// ===== Get sheet =====
 async function getSheet() {
   await doc.loadInfo();
   const sheet = doc.sheetsByTitle[SHEET_NAME];
@@ -105,7 +111,6 @@ async function getAndDeleteNumbers(totalNeeded) {
   for (let i = 0; i < totalNeeded; i++) {
     const r = rows[i];
 
-    // raw data approach (fast)
     const valueFromArray =
       Array.isArray(r._rawData) && r._rawData.length > colIndex
         ? r._rawData[colIndex]
@@ -116,9 +121,8 @@ async function getAndDeleteNumbers(totalNeeded) {
     picked.push(val);
   }
 
-  // WRITE: delete first N rows in ONE request using Sheets API batchUpdate
-  // startIndex 0 = row 1, endIndex = totalNeeded (exclusive)
-  await doc.sheetsApi.spreadsheets.batchUpdate({
+  // WRITE: delete first N rows (1 request) using official Google Sheets API
+  await sheetsApi.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
     requestBody: {
       requests: [
@@ -127,8 +131,8 @@ async function getAndDeleteNumbers(totalNeeded) {
             range: {
               sheetId: sheet.sheetId,
               dimension: "ROWS",
-              startIndex: 0,
-              endIndex: totalNeeded,
+              startIndex: 0, // row 1
+              endIndex: totalNeeded, // exclusive
             },
           },
         },
@@ -142,7 +146,6 @@ async function getAndDeleteNumbers(totalNeeded) {
 // ===== Create VALID vCard =====
 function createVcard(numbers, filename, letter) {
   let content = "";
-
   numbers.forEach((num, idx) => {
     const name = `${letter} ${String(idx + 1).padStart(3, "0")}`;
     content +=
@@ -194,7 +197,6 @@ bot.command("vcard", async (ctx) => {
     return;
   }
 
-  // Must start bot in DM first to allow sending files
   if (!users[String(user.id)]) {
     await ctx.reply("❌ Chat bot dulu via japri kirim /start");
     return;
@@ -246,8 +248,7 @@ bot.command("vcard", async (ctx) => {
       fs.unlinkSync(filename);
     } catch {}
 
-    // small delay to avoid Telegram flood limits
-    await sleep(300);
+    await sleep(300); // avoid Telegram flood limits
   }
 
   await ctx.reply("✅ Vcard done cek japri ye");
@@ -255,9 +256,8 @@ bot.command("vcard", async (ctx) => {
 
 // ===== RUN BOT =====
 bot.launch().then(() => {
-  console.log("🟢 VCARD BOT + WEB SERVICE BERJALAN (FINAL BATCH DELETE READY)");
+  console.log("🟢 VCARD BOT + WEB SERVICE BERJALAN (GOOGLEAPIS BATCH DELETE READY)");
 });
 
-// Graceful stop
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
