@@ -10,7 +10,7 @@ const { JWT } = require("google-auth-library");
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SHEET_NAME = process.env.SHEET_NAME || "Sheet1";
-const DB_COLUMN = parseInt(process.env.DB_COLUMN || "1", 10);
+const DB_COLUMN = parseInt(process.env.DB_COLUMN || "1", 10); // 1 = kolom A
 const GOOGLE_CREDS_JSON = process.env.GOOGLE_CREDS_JSON;
 const USERS_FILE = process.env.USERS_FILE || "users.json";
 // =======================================================
@@ -18,8 +18,10 @@ const USERS_FILE = process.env.USERS_FILE || "users.json";
 if (!BOT_TOKEN) throw new Error("❌ BOT_TOKEN tidak ditemukan. Set di Render env vars.");
 if (!SPREADSHEET_ID) throw new Error("❌ SPREADSHEET_ID tidak ditemukan. Set di Render env vars.");
 if (!GOOGLE_CREDS_JSON) throw new Error("❌ GOOGLE_CREDS_JSON tidak ditemukan. Set di Render env vars.");
+if (!SHEET_NAME) throw new Error("❌ SHEET_NAME kosong.");
+if (!DB_COLUMN || DB_COLUMN < 1) throw new Error("❌ DB_COLUMN harus angka >= 1");
 
-// ===== HTTP Server (Render Web Service needs port) =====
+// ===== HTTP Server (Render Web Service needs open port) =====
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -42,15 +44,25 @@ if (fs.existsSync(USERS_FILE)) {
 }
 
 function saveUsers() {
-  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), "utf-8");
+  try {
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), "utf-8");
+  } catch (e) {
+    console.error("saveUsers error:", e);
+  }
 }
 
 // ===== Google Sheets (JWT Auth) =====
-const creds = JSON.parse(GOOGLE_CREDS_JSON);
+let creds = {};
+try {
+  creds = JSON.parse(GOOGLE_CREDS_JSON);
+} catch (e) {
+  throw new Error("❌ GOOGLE_CREDS_JSON bukan JSON valid. Pastikan paste credentials.json full.");
+}
 
-// FIX: Render env kadang simpan newline jadi \\n
-if (creds.private_key && creds.private_key.includes("\\n")) {
+// FIX: Render env kadang simpan newline jadi \\n + ada \r
+if (creds.private_key) {
   creds.private_key = creds.private_key.replace(/\\n/g, "\n");
+  creds.private_key = creds.private_key.replace(/\r/g, "");
 }
 
 const jwt = new JWT({
@@ -67,41 +79,52 @@ const doc = new GoogleSpreadsheet(SPREADSHEET_ID, jwt);
 async function getSheet() {
   await doc.loadInfo();
   const sheet = doc.sheetsByTitle[SHEET_NAME];
-  if (!sheet) throw new Error(`❌ Sheet "${SHEET_NAME}" tidak ditemukan. Pastikan SHEET_NAME sesuai tab.`);
+  if (!sheet) {
+    throw new Error(`❌ Sheet "${SHEET_NAME}" tidak ditemukan. Cek env SHEET_NAME sesuai nama tab.`);
+  }
   return sheet;
 }
 
-// ===== Get & delete numbers =====
+// ===== Convert column number -> letters (1->A, 2->B, 27->AA) =====
+function colToLetter(colNum) {
+  let temp = colNum;
+  let letter = "";
+  while (temp > 0) {
+    let mod = (temp - 1) % 26;
+    letter = String.fromCharCode(65 + mod) + letter;
+    temp = Math.floor((temp - mod) / 26);
+  }
+  return letter;
+}
+
+// ===== Get & delete numbers (ANTI QUOTA: delete rows in 1 call) =====
 async function getAndDeleteNumbers(totalNeeded) {
   const sheet = await getSheet();
 
-  const rows = await sheet.getRows();
-  if (rows.length < totalNeeded) return [];
+  // Column range based on DB_COLUMN
+  const colLetter = colToLetter(DB_COLUMN);
+  const range = `${colLetter}1:${colLetter}${totalNeeded}`;
 
-  const colIndex = DB_COLUMN - 1;
+  // Read the cells in one go
+  await sheet.loadCells(range);
+
   const picked = [];
-  const rowsToDelete = [];
-
   for (let i = 0; i < totalNeeded; i++) {
-    const r = rows[i];
-    const valueFromArray =
-      Array.isArray(r._rawData) && r._rawData.length > colIndex ? r._rawData[colIndex] : null;
-
-    const val = (valueFromArray || "").toString().trim();
-    if (!val) return [];
-
+    const cell = sheet.getCell(i, DB_COLUMN - 1);
+    const val = (cell.value || "").toString().trim();
+    if (!val) {
+      return [];
+    }
     picked.push(val);
-    rowsToDelete.push(r);
   }
 
-  for (let i = rowsToDelete.length - 1; i >= 0; i--) {
-    await rowsToDelete[i].delete();
-  }
+  // Delete rows in one call (hemat quota)
+  await sheet.deleteRows(1, totalNeeded);
 
   return picked;
 }
 
-// ===== Create vCard =====
+// ===== Create VALID vCard =====
 function createVcard(numbers, filename, letter) {
   let content = "";
   numbers.forEach((num, idx) => {
@@ -118,12 +141,24 @@ function createVcard(numbers, filename, letter) {
   fs.writeFileSync(filename, content, "utf-8");
 }
 
+// ===== sleep helper =====
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // ===== /start =====
 bot.start(async (ctx) => {
   const user = ctx.from;
   users[String(user.id)] = user.username || "";
   saveUsers();
-  await ctx.reply("✅ Bot siap. Kamu bisa request dari grup.");
+
+  await ctx.reply(
+    "✅ Bot siap.\n" +
+      "Kamu sudah terdaftar.\n\n" +
+      "Cara pakai:\n" +
+      "/vcard <jumlah_file> <isi_per_file>\n" +
+      "Contoh: /vcard 2 300"
+  );
 });
 
 // ===== /vcard =====
@@ -131,6 +166,7 @@ bot.command("vcard", async (ctx) => {
   const user = ctx.from;
   const parts = (ctx.message.text || "").split(" ").filter(Boolean);
 
+  // Expect: /vcard 2 300
   if (parts.length !== 3) {
     await ctx.reply("❌ Format: /vcard <jumlah_file> <isi_per_file>");
     return;
@@ -148,12 +184,14 @@ bot.command("vcard", async (ctx) => {
     return;
   }
 
+  // must /start first so bot can DM user
   if (!users[String(user.id)]) {
     await ctx.reply("❌ Chat bot dulu via japri kirim /start");
     return;
   }
 
   const totalNeeded = fileCount * perFile;
+
   await ctx.reply("⏳ Otw proses, wait ye...");
 
   let numbers = [];
@@ -174,7 +212,7 @@ bot.command("vcard", async (ctx) => {
   }
 
   if (!numbers || numbers.length === 0) {
-    await ctx.reply("❌ Database tidak mencukupi");
+    await ctx.reply("❌ Database tidak mencukupi / ada cell kosong di awal kolom.");
     return;
   }
 
@@ -198,12 +236,19 @@ bot.command("vcard", async (ctx) => {
     try {
       fs.unlinkSync(filename);
     } catch {}
+
+    // kasih jeda dikit biar aman kalau kirim banyak file
+    await sleep(300);
   }
 
   await ctx.reply("✅ Vcard done cek japri ye");
 });
 
-bot.launch().then(() => console.log("🟢 VCARD BOT + WEB SERVICE BERJALAN (DEBUG READY)"));
+// ===== RUN BOT =====
+bot.launch().then(() => {
+  console.log("🟢 VCARD BOT + WEB SERVICE BERJALAN (FINAL ANTI-QUOTA READY)");
+});
 
+// Graceful stop
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
