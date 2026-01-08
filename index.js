@@ -4,6 +4,7 @@ const path = require("path");
 const express = require("express");
 const { Telegraf } = require("telegraf");
 const { GoogleSpreadsheet } = require("google-spreadsheet");
+const { JWT } = require("google-auth-library");
 
 // ================= CONFIG (Render Env) =================
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -22,17 +23,10 @@ if (!GOOGLE_CREDS_JSON) throw new Error("❌ GOOGLE_CREDS_JSON tidak ditemukan. 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get("/", (req, res) => {
-  res.status(200).send("✅ Bot is running (Web Service)!");
-});
+app.get("/", (req, res) => res.status(200).send("✅ Bot is running (Web Service)!"));
+app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
 
-app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok" });
-});
-
-app.listen(PORT, () => {
-  console.log(`🌐 Web server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 
 // ===== Telegram Bot =====
 const bot = new Telegraf(BOT_TOKEN);
@@ -51,16 +45,22 @@ function saveUsers() {
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), "utf-8");
 }
 
-// ===== Google Sheet init =====
+// ===== Google Sheets (JWT Auth) =====
 const creds = JSON.parse(GOOGLE_CREDS_JSON);
-const doc = new GoogleSpreadsheet(SPREADSHEET_ID);
+
+const jwt = new JWT({
+  email: creds.client_email,
+  key: creds.private_key,
+  scopes: [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
+  ],
+});
+
+const doc = new GoogleSpreadsheet(SPREADSHEET_ID, jwt);
 
 async function getSheet() {
-  await doc.useServiceAccountAuth({
-    client_email: creds.client_email,
-    private_key: creds.private_key,
-  });
-
   await doc.loadInfo();
 
   const sheet = doc.sheetsByTitle[SHEET_NAME];
@@ -94,7 +94,6 @@ async function getAndDeleteNumbers(totalNeeded) {
     rowsToDelete.push(r);
   }
 
-  // delete from back for safety
   for (let i = rowsToDelete.length - 1; i >= 0; i--) {
     await rowsToDelete[i].delete();
   }
@@ -162,8 +161,8 @@ bot.command("vcard", async (ctx) => {
   try {
     numbers = await getAndDeleteNumbers(totalNeeded);
   } catch (err) {
-    console.error(err);
-    await ctx.reply("❌ Error akses Google Sheet. Cek credentials / share sheet ke service account.");
+    console.error("Google Sheet Error:", err);
+    await ctx.reply("❌ Error akses Google Sheet:\n" + (err.message || err.toString()));
     return;
   }
 
@@ -199,7 +198,7 @@ bot.command("vcard", async (ctx) => {
 
 // ===== RUN BOT =====
 bot.launch().then(() => {
-  console.log("🟢 VCARD BOT + WEB SERVICE BERJALAN (RENDER READY)");
+  console.log("🟢 VCARD BOT + WEB SERVICE BERJALAN (JWT AUTH READY)");
 });
 
 // Graceful stop
