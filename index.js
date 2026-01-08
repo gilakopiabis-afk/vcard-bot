@@ -10,7 +10,7 @@ const { JWT } = require("google-auth-library");
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SHEET_NAME = process.env.SHEET_NAME || "Sheet1";
-const DB_COLUMN = parseInt(process.env.DB_COLUMN || "1", 10); // 1 = kolom A
+const DB_COLUMN = parseInt(process.env.DB_COLUMN || "1", 10);
 const GOOGLE_CREDS_JSON = process.env.GOOGLE_CREDS_JSON;
 const USERS_FILE = process.env.USERS_FILE || "users.json";
 // =======================================================
@@ -19,7 +19,7 @@ if (!BOT_TOKEN) throw new Error("❌ BOT_TOKEN tidak ditemukan. Set di Render en
 if (!SPREADSHEET_ID) throw new Error("❌ SPREADSHEET_ID tidak ditemukan. Set di Render env vars.");
 if (!GOOGLE_CREDS_JSON) throw new Error("❌ GOOGLE_CREDS_JSON tidak ditemukan. Set di Render env vars.");
 
-// ===== HTTP Server (Wajib untuk Render Web Service) =====
+// ===== HTTP Server (Render Web Service needs port) =====
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -48,12 +48,16 @@ function saveUsers() {
 // ===== Google Sheets (JWT Auth) =====
 const creds = JSON.parse(GOOGLE_CREDS_JSON);
 
+// FIX: Render env kadang simpan newline jadi \\n
+if (creds.private_key && creds.private_key.includes("\\n")) {
+  creds.private_key = creds.private_key.replace(/\\n/g, "\n");
+}
+
 const jwt = new JWT({
   email: creds.client_email,
   key: creds.private_key,
   scopes: [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/drive",
   ],
 });
@@ -62,9 +66,8 @@ const doc = new GoogleSpreadsheet(SPREADSHEET_ID, jwt);
 
 async function getSheet() {
   await doc.loadInfo();
-
   const sheet = doc.sheetsByTitle[SHEET_NAME];
-  if (!sheet) throw new Error(`❌ Sheet "${SHEET_NAME}" tidak ditemukan di Spreadsheet`);
+  if (!sheet) throw new Error(`❌ Sheet "${SHEET_NAME}" tidak ditemukan. Pastikan SHEET_NAME sesuai tab.`);
   return sheet;
 }
 
@@ -81,11 +84,8 @@ async function getAndDeleteNumbers(totalNeeded) {
 
   for (let i = 0; i < totalNeeded; i++) {
     const r = rows[i];
-
     const valueFromArray =
-      Array.isArray(r._rawData) && r._rawData.length > colIndex
-        ? r._rawData[colIndex]
-        : null;
+      Array.isArray(r._rawData) && r._rawData.length > colIndex ? r._rawData[colIndex] : null;
 
     const val = (valueFromArray || "").toString().trim();
     if (!val) return [];
@@ -101,7 +101,7 @@ async function getAndDeleteNumbers(totalNeeded) {
   return picked;
 }
 
-// ===== Create VALID vCard =====
+// ===== Create vCard =====
 function createVcard(numbers, filename, letter) {
   let content = "";
   numbers.forEach((num, idx) => {
@@ -129,8 +129,7 @@ bot.start(async (ctx) => {
 // ===== /vcard =====
 bot.command("vcard", async (ctx) => {
   const user = ctx.from;
-  const msg = ctx.message.text || "";
-  const parts = msg.split(" ").filter(Boolean);
+  const parts = (ctx.message.text || "").split(" ").filter(Boolean);
 
   if (parts.length !== 3) {
     await ctx.reply("❌ Format: /vcard <jumlah_file> <isi_per_file>");
@@ -161,8 +160,16 @@ bot.command("vcard", async (ctx) => {
   try {
     numbers = await getAndDeleteNumbers(totalNeeded);
   } catch (err) {
-    console.error("Google Sheet Error:", err);
-    await ctx.reply("❌ Error akses Google Sheet:\n" + (err.message || err.toString()));
+    console.error("Google Sheet Error FULL:", err);
+
+    const msg =
+      err?.response?.data?.error?.message ||
+      err?.response?.data?.error_description ||
+      err?.message ||
+      JSON.stringify(err, null, 2) ||
+      String(err);
+
+    await ctx.reply("❌ Error akses Google Sheet:\n" + msg);
     return;
   }
 
@@ -196,11 +203,7 @@ bot.command("vcard", async (ctx) => {
   await ctx.reply("✅ Vcard done cek japri ye");
 });
 
-// ===== RUN BOT =====
-bot.launch().then(() => {
-  console.log("🟢 VCARD BOT + WEB SERVICE BERJALAN (JWT AUTH READY)");
-});
+bot.launch().then(() => console.log("🟢 VCARD BOT + WEB SERVICE BERJALAN (DEBUG READY)"));
 
-// Graceful stop
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
