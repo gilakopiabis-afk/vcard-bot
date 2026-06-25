@@ -1,5 +1,5 @@
 const express = require("express");
-const { Telegraf } = require("telegraf");
+const { Telegraf, Input } = require("telegraf"); // <-- TAMBAHAN PENTING: Import Input
 const { JWT } = require("google-auth-library");
 const { google } = require("googleapis");
 
@@ -103,7 +103,7 @@ async function getAndDeleteNumbers(totalNeeded) {
   return picked;
 }
 
-// ===== Generate vCard Text (NO FILE SAVING) =====
+// ===== Generate vCard Text =====
 function generateVcardText(numbers, letter) {
   let content = "";
   numbers.forEach((num, idx) => {
@@ -166,20 +166,32 @@ bot.command("vcard", async (ctx) => {
     const batch = numbers.slice(index, index + perFile);
     index += perFile;
 
-    // Men-generate vCard langsung sebagai Memory Buffer (anti gagal kirim)
     const vcardText = generateVcardText(batch, letters[i % 26]);
     const fileBuffer = Buffer.from(vcardText, "utf-8");
+    const fileName = `Vcard_${letters[i % 26]}_${i + 1}.vcf`;
     
-    try {
-      await ctx.telegram.sendDocument(user.id, {
-        source: fileBuffer,
-        filename: `Vcard_${letters[i % 26]}_${i + 1}.vcf`
-      });
-      successCount++;
-    } catch (err) {
-      console.error("Gagal kirim dokumen:", err);
-      // Menambahkan pesan detail error agar kita tahu jika masih gagal
-      await ctx.telegram.sendMessage(user.id, `⚠️ Gagal mengirim file ke-${i + 1}. Detail: ${err.message}`);
+    // ===== SISTEM AUTO-RETRY JIKA JARINGAN PUTUS (SOCKET HANG UP) =====
+    let success = false;
+    let attempt = 0;
+    const maxAttempts = 3; // Akan mengulang 3 kali jika gagal kirim
+
+    while (attempt < maxAttempts && !success) {
+      try {
+        // Menggunakan Telegraf Input (Paling Aman)
+        await ctx.telegram.sendDocument(user.id, Input.fromBuffer(fileBuffer, fileName));
+        success = true; // Berhasil, keluar dari loop pengulangan
+        successCount++;
+      } catch (err) {
+        attempt++;
+        console.error(`[Error] Gagal kirim file ke-${i + 1}, percobaan ke-${attempt}:`, err.message);
+        
+        if (attempt >= maxAttempts) {
+          await ctx.telegram.sendMessage(user.id, `⚠️ Menyerah. Gagal mengirim file ke-${i + 1} setelah 3x percobaan. Detail: ${err.message}`);
+        } else {
+          // Tunggu 2 detik sebelum mencoba mengirim lagi
+          await sleep(2000); 
+        }
+      }
     }
 
     await sleep(1000); // Jeda 1 detik antar file
@@ -193,6 +205,6 @@ bot.command("vcard", async (ctx) => {
 });
 
 // ===== RUN BOT =====
-bot.launch().then(() => console.log("🟢 BOT VCARD BERJALAN DENGAN SEMPURNA! (BUFFER UPLOAD READY)"));
+bot.launch().then(() => console.log("🟢 BOT VCARD BERJALAN DENGAN SEMPURNA! (AUTO-RETRY READY)"));
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
