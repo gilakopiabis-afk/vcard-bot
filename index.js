@@ -1,6 +1,3 @@
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
 const express = require("express");
 const { Telegraf } = require("telegraf");
 const { JWT } = require("google-auth-library");
@@ -106,14 +103,14 @@ async function getAndDeleteNumbers(totalNeeded) {
   return picked;
 }
 
-// ===== Create vCard =====
-function createVcard(numbers, filename, letter) {
+// ===== Generate vCard Text (NO FILE SAVING) =====
+function generateVcardText(numbers, letter) {
   let content = "";
   numbers.forEach((num, idx) => {
     const name = `${letter} ${String(idx + 1).padStart(3, "0")}`;
     content += `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;;\nFN:${name}\nTEL;TYPE=CELL:${num}\nEND:VCARD\n`;
   });
-  fs.writeFileSync(filename, content, "utf-8");
+  return content;
 }
 
 // ===== /start =====
@@ -156,7 +153,6 @@ bot.command("vcard", async (ctx) => {
   try {
     numbers = await getAndDeleteNumbers(totalNeeded);
   } catch (err) {
-    // Kalau database kurang/error, lapor ke japri user
     console.error("Sheet Error:", err.message);
     await ctx.telegram.sendMessage(user.id, `❌ *PROSES GAGAL*\n\nAlasan: ${err.message}`, { parse_mode: "Markdown" });
     return;
@@ -170,39 +166,33 @@ bot.command("vcard", async (ctx) => {
     const batch = numbers.slice(index, index + perFile);
     index += perFile;
 
-    // Nama file dibuat SUPER UNIK agar tidak bentrok
-    const tempFileName = `vcard_${user.id}_${Date.now()}_${i + 1}.vcf`;
-    const tempPath = path.join(os.tmpdir(), tempFileName);
+    // Men-generate vCard langsung sebagai Memory Buffer (anti gagal kirim)
+    const vcardText = generateVcardText(batch, letters[i % 26]);
+    const fileBuffer = Buffer.from(vcardText, "utf-8");
     
     try {
-      createVcard(batch, tempPath, letters[i % 26]);
-
-      // Menggunakan ReadStream agar file dikirim dengan sempurna oleh sistem
       await ctx.telegram.sendDocument(user.id, {
-        source: fs.createReadStream(tempPath),
-        filename: `Vcard_${i + 1}.vcf`
+        source: fileBuffer,
+        filename: `Vcard_${letters[i % 26]}_${i + 1}.vcf`
       });
-      
       successCount++;
     } catch (err) {
       console.error("Gagal kirim dokumen:", err);
-      await ctx.telegram.sendMessage(user.id, `⚠️ Gagal mengirim file ke-${i + 1}. Error dari Telegram.`);
-    } finally {
-      // Pastikan selalu menghapus file temporary setelah kirim
-      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+      // Menambahkan pesan detail error agar kita tahu jika masih gagal
+      await ctx.telegram.sendMessage(user.id, `⚠️ Gagal mengirim file ke-${i + 1}. Detail: ${err.message}`);
     }
 
-    await sleep(1000); // Jeda 1 detik antar file agar tidak dianggap SPAM oleh Telegram
+    await sleep(1000); // Jeda 1 detik antar file
   }
 
   if (successCount === fileCount) {
     await ctx.telegram.sendMessage(user.id, "🎉 *SEMUA FILE SELESAI DIKIRIM!*", { parse_mode: "Markdown" });
   } else {
-    await ctx.telegram.sendMessage(user.id, "⚠️ Proses selesai, tapi sepertinya ada beberapa file yang gagal terkirim.");
+    await ctx.telegram.sendMessage(user.id, `⚠️ Proses selesai, tapi hanya ${successCount} dari ${fileCount} file yang berhasil terkirim.`);
   }
 });
 
 // ===== RUN BOT =====
-bot.launch().then(() => console.log("🟢 BOT VCARD BERJALAN DENGAN SEMPURNA!"));
+bot.launch().then(() => console.log("🟢 BOT VCARD BERJALAN DENGAN SEMPURNA! (BUFFER UPLOAD READY)"));
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
