@@ -3,7 +3,6 @@ const os = require("os");
 const path = require("path");
 const express = require("express");
 const { Telegraf } = require("telegraf");
-const { GoogleSpreadsheet } = require("google-spreadsheet");
 const { JWT } = require("google-auth-library");
 const { google } = require("googleapis");
 
@@ -13,6 +12,8 @@ const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SHEET_NAME = process.env.SHEET_NAME || "Sheet1";
 const DB_COLUMN = parseInt(process.env.DB_COLUMN || "1", 10); // 1 = kolom A
 const GOOGLE_CREDS_JSON = process.env.GOOGLE_CREDS_JSON;
+// USERS_FILE sudah tidak terlalu dibutuhkan karena kita pakai metode pre-check PM
+// tapi tetap disisakan jika kamu butuh untuk fitur lain.
 const USERS_FILE = process.env.USERS_FILE || "users.json";
 // =======================================================
 
@@ -34,24 +35,6 @@ app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 // ===== Telegram Bot =====
 const bot = new Telegraf(BOT_TOKEN);
 
-// ===== Load users =====
-let users = {};
-if (fs.existsSync(USERS_FILE)) {
-  try {
-    users = JSON.parse(fs.readFileSync(USERS_FILE, "utf-8"));
-  } catch {
-    users = {};
-  }
-}
-
-function saveUsers() {
-  try {
-    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), "utf-8");
-  } catch (e) {
-    console.error("saveUsers error:", e);
-  }
-}
-
 // ===== Google Credentials =====
 let creds = {};
 try {
@@ -60,10 +43,8 @@ try {
   throw new Error("❌ GOOGLE_CREDS_JSON bukan JSON valid. Paste credentials.json full.");
 }
 
-// FIX: newline sering berubah di env Render
 if (creds.private_key) {
-  creds.private_key = creds.private_key.replace(/\\n/g, "\n");
-  creds.private_key = creds.private_key.replace(/\r/g, "");
+  creds.private_key = creds.private_key.replace(/\\n/g, "\n").replace(/\r/g, "");
 }
 
 // ===== JWT Auth =====
@@ -76,20 +57,19 @@ const jwt = new JWT({
   ],
 });
 
-// ===== google-spreadsheet doc (untuk read rows) =====
-const doc = new GoogleSpreadsheet(SPREADSHEET_ID, jwt);
-
-// ===== googleapis sheets client (untuk batchUpdate delete rows) =====
+// ===== googleapis sheets client =====
 const sheetsApi = google.sheets({ version: "v4", auth: jwt });
 
-// ===== Get sheet =====
-async function getSheet() {
-  await doc.loadInfo();
-  const sheet = doc.sheetsByTitle[SHEET_NAME];
-  if (!sheet) {
-    throw new Error(`❌ Sheet "${SHEET_NAME}" tidak ditemukan. Cek env SHEET_NAME sesuai nama tab.`);
+// ===== Helper: Konversi Angka ke Huruf Kolom (1 -> A, 2 -> B) =====
+function getColLetter(colIndex) {
+  let letter = "";
+  let temp = colIndex;
+  while (temp > 0) {
+    let remainder = (temp - 1) % 26;
+    letter = String.fromCharCode(65 + remainder) + letter;
+    temp = Math.floor((temp - remainder) / 26);
   }
-  return sheet;
+  return letter;
 }
 
 // ===== sleep helper =====
@@ -97,31 +77,35 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ===== Get & delete numbers (READ then BATCH DELETE rows) =====
+// ===== Get & delete numbers (Fast Method using googleapis) =====
 async function getAndDeleteNumbers(totalNeeded) {
-  const sheet = await getSheet();
+  const colLetter = getColLetter(DB_COLUMN);
+  const range = `${SHEET_NAME}!${colLetter}1:${colLetter}${totalNeeded}`;
 
-  // READ: ambil row pertama sampai totalNeeded
-  const rows = await sheet.getRows({ limit: totalNeeded });
-  if (rows.length < totalNeeded) return [];
+  // 1. Dapatkan metadata untuk mencari sheetId
+  const sheetMeta = await sheetsApi.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
+  const sheet = sheetMeta.data.sheets.find((s) => s.properties.title === SHEET_NAME);
+  if (!sheet) throw new Error(`❌ Sheet "${SHEET_NAME}" tidak ditemukan.`);
+  const sheetId = sheet.properties.sheetId;
 
-  const colIndex = DB_COLUMN - 1;
+  // 2. READ: Ambil data secara instan (Jauh lebih cepat dari google-spreadsheet)
+  const response = await sheetsApi.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: range,
+  });
+
+  const rows = response.data.values || [];
+  if (rows.length < totalNeeded) return []; // Database kurang
+
   const picked = [];
-
   for (let i = 0; i < totalNeeded; i++) {
-    const r = rows[i];
-
-    const valueFromArray =
-      Array.isArray(r._rawData) && r._rawData.length > colIndex
-        ? r._rawData[colIndex]
-        : null;
-
-    const val = (valueFromArray || "").toString().trim();
-    if (!val) return [];
+    // Ambil value dari array, pastikan tidak kosong
+    const val = rows[i] && rows[i][0] ? rows[i][0].toString().trim() : "";
+    if (!val) return []; // Jika menemukan cell kosong di tengah jalan, stop.
     picked.push(val);
   }
 
-  // WRITE: delete first N rows (1 request) using official Google Sheets API
+  // 3. WRITE: Delete N baris pertama
   await sheetsApi.spreadsheets.batchUpdate({
     spreadsheetId: SPREADSHEET_ID,
     requestBody: {
@@ -129,10 +113,10 @@ async function getAndDeleteNumbers(totalNeeded) {
         {
           deleteDimension: {
             range: {
-              sheetId: sheet.sheetId,
+              sheetId: sheetId,
               dimension: "ROWS",
-              startIndex: 0, // row 1
-              endIndex: totalNeeded, // exclusive
+              startIndex: 0,
+              endIndex: totalNeeded,
             },
           },
         },
@@ -156,22 +140,18 @@ function createVcard(numbers, filename, letter) {
       `TEL;TYPE=CELL:${num}\n` +
       "END:VCARD\n";
   });
-
   fs.writeFileSync(filename, content, "utf-8");
 }
 
 // ===== /start =====
 bot.start(async (ctx) => {
-  const user = ctx.from;
-  users[String(user.id)] = user.username || "";
-  saveUsers();
-
   await ctx.reply(
-    "✅ Bot siap.\n" +
-      "Kamu sudah terdaftar.\n\n" +
-      "Cara pakai:\n" +
-      "/vcard <jumlah_file> <isi_per_file>\n" +
-      "Contoh: /vcard 2 300"
+    "✅ Bot siap melayani.\n\n" +
+    "Jalur komunikasi japri sudah terbuka.\n\n" +
+    "Cara pakai:\n" +
+    "`/vcard <jumlah_file> <isi_per_file>`\n" +
+    "Contoh: `/vcard 2 300`",
+    { parse_mode: "Markdown" }
   );
 });
 
@@ -181,52 +161,63 @@ bot.command("vcard", async (ctx) => {
   const parts = (ctx.message.text || "").split(" ").filter(Boolean);
 
   if (parts.length !== 3) {
-    await ctx.reply("❌ Format: /vcard <jumlah_file> <isi_per_file>");
-    return;
+    return ctx.reply("❌ Format salah! Gunakan: `/vcard <jumlah_file> <isi_per_file>`", { parse_mode: "Markdown" });
   }
 
   const fileCount = parseInt(parts[1], 10);
   const perFile = parseInt(parts[2], 10);
 
-  if (!Number.isInteger(fileCount) || !Number.isInteger(perFile)) {
-    await ctx.reply("❌ jumlah_file dan isi_per_file harus angka.");
-    return;
-  }
-  if (fileCount <= 0 || perFile <= 0) {
-    await ctx.reply("❌ jumlah_file dan isi_per_file harus > 0.");
-    return;
+  if (!Number.isInteger(fileCount) || !Number.isInteger(perFile) || fileCount <= 0 || perFile <= 0) {
+    return ctx.reply("❌ jumlah_file dan isi_per_file harus berupa angka lebih dari 0.");
   }
 
-  if (!users[String(user.id)]) {
-    await ctx.reply("❌ Chat bot dulu via japri kirim /start");
-    return;
+  // ===== CEK KONEKSI JAPRI SEBELUM AKSES GOOGLE SHEETS =====
+  // Ini mencegah database terpotong jika user belum start bot
+  let canPM = true;
+  try {
+    // Kirim pesan notifikasi ke japri user
+    await ctx.telegram.sendMessage(user.id, `⏳ Otw proses \`${fileCount}\` file vCard ya...`, { parse_mode: "Markdown" });
+  } catch (err) {
+    canPM = false;
   }
 
+  // Jika gagal kirim japri, beri info di grup & BERHENTIKAN PROSES
+  if (!canPM) {
+    return ctx.reply(
+      `❌ Gagal memproses!\n\n@${user.username || user.first_name}, bot belum memiliki izin untuk japri kamu.\nSilakan klik tombol di bawah ini lalu tekan **START**.`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Mulai Bot (Buka Japri)", url: `https://t.me/${ctx.botInfo.username}?start=start` }]
+          ]
+        }
+      }
+    );
+  }
+
+  // Jika request dari grup, beri info kalau proses sedang berjalan
+  if (ctx.chat.type !== "private") {
+    await ctx.reply(`✅ Permintaan diterima @${user.username || user.first_name}. Silakan cek japri ya!`);
+  }
+
+  // ===== AMBIL & POTONG DATA DI GOOGLE SHEETS =====
   const totalNeeded = fileCount * perFile;
-  await ctx.reply("⏳ Otw proses, wait ye...");
-
   let numbers = [];
+  
   try {
     numbers = await getAndDeleteNumbers(totalNeeded);
   } catch (err) {
-    console.error("Google Sheet Error FULL:", err);
-
-    const msg =
-      err?.response?.data?.error?.message ||
-      err?.response?.data?.error_description ||
-      err?.message ||
-      JSON.stringify(err, null, 2) ||
-      String(err);
-
-    await ctx.reply("❌ Error akses Google Sheet:\n" + msg);
+    console.error("Google Sheet Error:", err);
+    await ctx.telegram.sendMessage(user.id, "❌ Error akses Google Sheet! Cek log server.");
     return;
   }
 
   if (!numbers || numbers.length === 0) {
-    await ctx.reply("❌ Database tidak mencukupi / ada cell kosong di awal kolom.");
+    await ctx.telegram.sendMessage(user.id, "❌ Database tidak mencukupi atau terdapat cell kosong di baris awal.");
     return;
   }
 
+  // ===== BUAT & KIRIM VCARD =====
   const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   let index = 0;
 
@@ -240,23 +231,25 @@ bot.command("vcard", async (ctx) => {
     try {
       await ctx.telegram.sendDocument(user.id, { source: filename });
     } catch (err) {
-      console.error("sendDocument error:", err);
-      await ctx.reply("❌ Gagal kirim file ke japri. Pastikan kamu sudah /start di bot.");
+      console.error("Gagal kirim file VCard ke", user.id);
+      // Jika di tengah pengiriman user memblokir bot, loop dihentikan agar tidak spam error
+      break; 
     }
 
+    // Hapus file temporary
     try {
       fs.unlinkSync(filename);
     } catch {}
 
-    await sleep(300); // avoid Telegram flood limits
+    await sleep(300); // Hindari limit Telegram (Flood Wait)
   }
 
-  await ctx.reply("✅ Vcard done cek japri ye");
+  await ctx.telegram.sendMessage(user.id, "✅ Semua file VCard berhasil dikirim!");
 });
 
 // ===== RUN BOT =====
 bot.launch().then(() => {
-  console.log("🟢 VCARD BOT + WEB SERVICE BERJALAN (GOOGLEAPIS BATCH DELETE READY)");
+  console.log("🟢 VCARD BOT + WEB SERVICE BERJALAN LANCAR (ANTI TIMEOUT READY)");
 });
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
