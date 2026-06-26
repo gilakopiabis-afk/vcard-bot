@@ -1,5 +1,6 @@
 const express = require("express");
-const { Telegraf, Input } = require("telegraf"); // <-- TAMBAHAN PENTING: Import Input
+const { Telegraf } = require("telegraf");
+const https = require("https"); // Tambahan untuk menstabilkan jaringan Render
 const { JWT } = require("google-auth-library");
 const { google } = require("googleapis");
 
@@ -21,8 +22,12 @@ const PORT = process.env.PORT || 3000;
 app.get("/", (req, res) => res.status(200).send("✅ Bot Web Service is Running!"));
 app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 
-// ===== Telegram Bot =====
-const bot = new Telegraf(BOT_TOKEN);
+// ===== Telegram Bot (Dengan Keep-Alive Agent) =====
+// Agent ini mencegah "socket hang up" dan crash diam-diam di Render
+const agent = new https.Agent({ keepAlive: true, keepAliveMsecs: 10000 });
+const bot = new Telegraf(BOT_TOKEN, {
+  telegram: { agent: agent }
+});
 
 // ===== Google Credentials =====
 let creds = {};
@@ -78,13 +83,13 @@ async function getAndDeleteNumbers(totalNeeded) {
 
   const rows = response.data.values || [];
   if (rows.length < totalNeeded) {
-    throw new Error(`Database kurang! Kamu minta ${totalNeeded} nomor, tapi bot hanya bisa baca ${rows.length} nomor di kolom ${colLetter}.`);
+    throw new Error(`Database kurang! Minta ${totalNeeded}, sisa ${rows.length}.`);
   }
 
   const picked = [];
   for (let i = 0; i < totalNeeded; i++) {
     const val = rows[i] && rows[i][0] ? rows[i][0].toString().trim() : "";
-    if (!val) throw new Error(`Ada baris kosong (blank cell) di urutan ke-${i + 1}. Harap rapikan datamu.`);
+    if (!val) throw new Error(`Ada cell kosong di baris ke-${i + 1}.`);
     picked.push(val);
   }
 
@@ -115,7 +120,7 @@ function generateVcardText(numbers, letter) {
 
 // ===== /start =====
 bot.start(async (ctx) => {
-  await ctx.reply("✅ Bot siap melayani.\nJalur japri sudah terbuka!\nKetik /vcard <jumlah_file> <isi> di grup.");
+  await ctx.reply("✅ Bot siap tempur.\nJalur Gas sudah bisa request!\nKetik /vcard <jumlah_file> <isi> di grup.");
 });
 
 // ===== /vcard =====
@@ -124,27 +129,26 @@ bot.command("vcard", async (ctx) => {
   const parts = (ctx.message.text || "").split(" ").filter(Boolean);
 
   if (parts.length !== 3) {
-    return ctx.reply("❌ Format salah! Gunakan: `/vcard <jumlah_file> <isi_per_file>`", { parse_mode: "Markdown" });
+    return ctx.reply("❌ Format: `/vcard <jumlah_file> <isi_per_file>`", { parse_mode: "Markdown" });
   }
 
   const fileCount = parseInt(parts[1], 10);
   const perFile = parseInt(parts[2], 10);
 
   if (!Number.isInteger(fileCount) || !Number.isInteger(perFile) || fileCount <= 0 || perFile <= 0) {
-    return ctx.reply("❌ jumlah_file dan isi_per_file harus berupa angka lebih dari 0.");
+    return ctx.reply("❌ jumlah dan isi harus angka > 0.");
   }
 
-  // Cek izin japri
   try {
-    await ctx.telegram.sendMessage(user.id, `⏳ Tunggu sebentar ya, sedang menyusun \`${fileCount}\` file vCard...`, { parse_mode: "Markdown" });
+    await ctx.telegram.sendMessage(user.id, `⏳ Tunggu bentar ya, lagi dibikin \`${fileCount}\` file vCard...`, { parse_mode: "Markdown" });
   } catch (err) {
-    return ctx.reply(`❌ @${user.username || user.first_name}, bot belum punya izin japri kamu. Klik tombol di bawah.`, {
+    return ctx.reply(`❌ @${user.username || user.first_name}, bot belum punya izin japri.`, {
       reply_markup: { inline_keyboard: [[{ text: "Buka Japri", url: `https://t.me/${ctx.botInfo.username}?start=start` }]] }
     });
   }
 
   if (ctx.chat.type !== "private") {
-    await ctx.reply(`✅ Permintaan diterima @${user.username || user.first_name}. Silakan cek japri ya!`);
+    await ctx.reply(`✅ Permintaan diproses @${user.username || user.first_name}. Silakan cek japri ya!`);
   }
 
   const totalNeeded = fileCount * perFile;
@@ -154,7 +158,7 @@ bot.command("vcard", async (ctx) => {
     numbers = await getAndDeleteNumbers(totalNeeded);
   } catch (err) {
     console.error("Sheet Error:", err.message);
-    await ctx.telegram.sendMessage(user.id, `❌ *PROSES GAGAL*\n\nAlasan: ${err.message}`, { parse_mode: "Markdown" });
+    await ctx.telegram.sendMessage(user.id, `❌ *PROSES GAGAL*\n${err.message}`, { parse_mode: "Markdown" });
     return;
   }
 
@@ -170,41 +174,43 @@ bot.command("vcard", async (ctx) => {
     const fileBuffer = Buffer.from(vcardText, "utf-8");
     const fileName = `Vcard_${letters[i % 26]}_${i + 1}.vcf`;
     
-    // ===== SISTEM AUTO-RETRY JIKA JARINGAN PUTUS (SOCKET HANG UP) =====
     let success = false;
     let attempt = 0;
-    const maxAttempts = 3; // Akan mengulang 3 kali jika gagal kirim
 
-    while (attempt < maxAttempts && !success) {
+    // Pemberitahuan real-time agar tahu bot tidak nge-hang
+    await ctx.telegram.sendMessage(user.id, `🚀 Mengirim file ke-${i + 1}...`);
+
+    while (attempt < 3 && !success) {
       try {
-        // Menggunakan Telegraf Input (Paling Aman)
-        await ctx.telegram.sendDocument(user.id, Input.fromBuffer(fileBuffer, fileName));
-        success = true; // Berhasil, keluar dari loop pengulangan
+        // Format paling stabil untuk mengirim buffer di Telegraf
+        await ctx.telegram.sendDocument(user.id, {
+          source: fileBuffer,
+          filename: fileName
+        });
+        success = true;
         successCount++;
       } catch (err) {
         attempt++;
-        console.error(`[Error] Gagal kirim file ke-${i + 1}, percobaan ke-${attempt}:`, err.message);
-        
-        if (attempt >= maxAttempts) {
-          await ctx.telegram.sendMessage(user.id, `⚠️ Menyerah. Gagal mengirim file ke-${i + 1} setelah 3x percobaan. Detail: ${err.message}`);
+        console.error(`Gagal kirim ${fileName}, coba ${attempt}:`, err.message);
+        if (attempt >= 3) {
+          await ctx.telegram.sendMessage(user.id, `⚠️ Gagal mengirim file ke-${i + 1} setelah 3x coba. Error: ${err.message}`);
         } else {
-          // Tunggu 2 detik sebelum mencoba mengirim lagi
-          await sleep(2000); 
+          await sleep(2000);
         }
       }
     }
 
-    await sleep(1000); // Jeda 1 detik antar file
+    await sleep(1500); // Jeda agar terhindar dari spam limit Telegram
   }
 
   if (successCount === fileCount) {
     await ctx.telegram.sendMessage(user.id, "🎉 *SEMUA FILE SELESAI DIKIRIM!*", { parse_mode: "Markdown" });
   } else {
-    await ctx.telegram.sendMessage(user.id, `⚠️ Proses selesai, tapi hanya ${successCount} dari ${fileCount} file yang berhasil terkirim.`);
+    await ctx.telegram.sendMessage(user.id, `⚠️ Selesai, tapi hanya ${successCount} dari ${fileCount} file terkirim.`);
   }
 });
 
 // ===== RUN BOT =====
-bot.launch().then(() => console.log("🟢 BOT VCARD BERJALAN DENGAN SEMPURNA! (AUTO-RETRY READY)"));
+bot.launch().then(() => console.log("🟢 BOT VCARD BERJALAN: KONEKSI STABIL + REALTIME LOG"));
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
