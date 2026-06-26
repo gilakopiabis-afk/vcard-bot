@@ -1,10 +1,16 @@
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
 const express = require("express");
 const { Telegraf } = require("telegraf");
 const { JWT } = require("google-auth-library");
 const { google } = require("googleapis");
+
+// ===== 🛡️ SABUK PENGAMAN ANTI-CRASH (SANGAT PENTING) =====
+// Mencegah bot mati/restart otomatis jika terjadi lag jaringan ke Telegram
+process.on('uncaughtException', (err) => {
+  console.error('💥 [Tercegah] Uncaught Exception:', err.message);
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 [Tercegah] Unhandled Rejection:', reason);
+});
 
 // ================= CONFIG (Render Env) =================
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -24,8 +30,9 @@ const PORT = process.env.PORT || 3000;
 app.get("/", (req, res) => res.status(200).send("✅ Bot Web Service is Running!"));
 app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
 
-// ===== Telegram Bot (Tanpa Agent Tambahan) =====
-const bot = new Telegraf(BOT_TOKEN);
+// ===== Telegram Bot =====
+// Menambahkan handlerTimeout yang lebih panjang untuk mencegah error 90000ms
+const bot = new Telegraf(BOT_TOKEN, { handlerTimeout: 9000000 });
 
 // ===== Google Credentials =====
 let creds = {};
@@ -105,20 +112,21 @@ async function getAndDeleteNumbers(totalNeeded) {
   return picked;
 }
 
-// ===== Generate & Save vCard to Disk (Paling Stabil di Render) =====
-function createVcardFile(numbers, filename, letter) {
+// ===== Generate vCard Text =====
+function generateVcardText(numbers, letter) {
   let content = "";
   numbers.forEach((num, idx) => {
     const name = `${letter} ${String(idx + 1).padStart(3, "0")}`;
     content += `BEGIN:VCARD\nVERSION:3.0\nN:${name};;;;\nFN:${name}\nTEL;TYPE=CELL:${num}\nEND:VCARD\n`;
   });
-  // Tulis ke file sementara
-  fs.writeFileSync(filename, content, "utf-8");
+  return content;
 }
 
 // ===== /start =====
 bot.start(async (ctx) => {
-  await ctx.reply("✅ Bot siap melayani.\nJalur japri sudah terbuka!\nKetik /vcard <jumlah_file> <isi> di grup.");
+  try {
+    await ctx.reply("✅ Bot siap melayani.\nJalur japri sudah terbuka!\nKetik /vcard <jumlah_file> <isi> di grup.");
+  } catch(e) { console.error("Start error", e); }
 });
 
 // ===== /vcard =====
@@ -127,26 +135,32 @@ bot.command("vcard", async (ctx) => {
   const parts = (ctx.message.text || "").split(" ").filter(Boolean);
 
   if (parts.length !== 3) {
-    return ctx.reply("❌ Format: `/vcard <jumlah_file> <isi_per_file>`", { parse_mode: "Markdown" });
+    try { await ctx.reply("❌ Format: `/vcard <jumlah_file> <isi_per_file>`", { parse_mode: "Markdown" }); } catch(e){}
+    return;
   }
 
   const fileCount = parseInt(parts[1], 10);
   const perFile = parseInt(parts[2], 10);
 
   if (!Number.isInteger(fileCount) || !Number.isInteger(perFile) || fileCount <= 0 || perFile <= 0) {
-    return ctx.reply("❌ jumlah dan isi harus angka > 0.");
+    try { await ctx.reply("❌ jumlah dan isi harus angka > 0."); } catch(e){}
+    return;
   }
 
+  // Cek Izin Japri
   try {
     await ctx.telegram.sendMessage(user.id, `⏳ Tunggu sebentar ya, sedang menyusun \`${fileCount}\` file vCard...`, { parse_mode: "Markdown" });
   } catch (err) {
-    return ctx.reply(`❌ @${user.username || user.first_name}, bot belum punya izin japri.`, {
-      reply_markup: { inline_keyboard: [[{ text: "Buka Japri", url: `https://t.me/${ctx.botInfo.username}?start=start` }]] }
-    });
+    try {
+      await ctx.reply(`❌ @${user.username || user.first_name}, bot belum punya izin japri.`, {
+        reply_markup: { inline_keyboard: [[{ text: "Buka Japri", url: `https://t.me/${ctx.botInfo.username}?start=start` }]] }
+      });
+    } catch(e){}
+    return;
   }
 
   if (ctx.chat.type !== "private") {
-    await ctx.reply(`✅ Permintaan diproses @${user.username || user.first_name}. Silakan cek japri ya!`);
+    try { await ctx.reply(`✅ Permintaan diproses @${user.username || user.first_name}. Silakan cek japri ya!`); } catch(e){}
   }
 
   const totalNeeded = fileCount * perFile;
@@ -156,7 +170,7 @@ bot.command("vcard", async (ctx) => {
     numbers = await getAndDeleteNumbers(totalNeeded);
   } catch (err) {
     console.error("Sheet Error:", err.message);
-    await ctx.telegram.sendMessage(user.id, `❌ *PROSES GAGAL*\n${err.message}`, { parse_mode: "Markdown" });
+    try { await ctx.telegram.sendMessage(user.id, `❌ *PROSES GAGAL*\n${err.message}`, { parse_mode: "Markdown" }); } catch(e){}
     return;
   }
 
@@ -168,24 +182,20 @@ bot.command("vcard", async (ctx) => {
     const batch = numbers.slice(index, index + perFile);
     index += perFile;
 
-    // 1. Buat nama file unik di folder Temporary Server
-    const uniqueFileName = `Vcard_${letters[i % 26]}_${i + 1}.vcf`;
-    const tempPath = path.join(os.tmpdir(), uniqueFileName);
-    
-    // 2. Simpan fisik filenya
-    createVcardFile(batch, tempPath, letters[i % 26]);
+    const vcardText = generateVcardText(batch, letters[i % 26]);
+    const fileBuffer = Buffer.from(vcardText, "utf-8");
+    const fileName = `Vcard_${letters[i % 26]}_${i + 1}.vcf`;
 
-    await ctx.telegram.sendMessage(user.id, `🚀 Mengirim file ke-${i + 1}...`);
+    try { await ctx.telegram.sendMessage(user.id, `🚀 Mengirim file ke-${i + 1}...`); } catch(e){}
 
     let success = false;
     let attempt = 0;
 
-    // 3. Sistem Auto-Retry
     while (attempt < 3 && !success) {
       try {
-        // 4. Kirim dengan menyebutkan string 'path' filenya (metode bawaan yang anti-hang)
         await ctx.telegram.sendDocument(user.id, {
-          source: tempPath
+          source: fileBuffer,
+          filename: fileName
         });
         success = true;
         successCount++;
@@ -193,28 +203,23 @@ bot.command("vcard", async (ctx) => {
         attempt++;
         console.error(`Gagal kirim file, coba ${attempt}:`, err.message);
         if (attempt >= 3) {
-          await ctx.telegram.sendMessage(user.id, `⚠️ Gagal mengirim file ke-${i + 1}.`);
+          try { await ctx.telegram.sendMessage(user.id, `⚠️ Gagal mengirim file ke-${i + 1}.`); } catch(e){}
         } else {
           await sleep(2000);
         }
       }
     }
 
-    // 5. Hapus file dari server agar tidak memenuhi memori
-    try {
-      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-    } catch (e) {}
-
     await sleep(1500); // Jeda anti limit
   }
 
   if (successCount === fileCount) {
-    await ctx.telegram.sendMessage(user.id, "🎉 *SEMUA FILE SELESAI DIKIRIM!*", { parse_mode: "Markdown" });
+    try { await ctx.telegram.sendMessage(user.id, "🎉 *SEMUA FILE SELESAI DIKIRIM!*", { parse_mode: "Markdown" }); } catch(e){}
   } else {
-    await ctx.telegram.sendMessage(user.id, `⚠️ Selesai, tapi hanya ${successCount} dari ${fileCount} file terkirim.`);
+    try { await ctx.telegram.sendMessage(user.id, `⚠️ Selesai, tapi hanya ${successCount} dari ${fileCount} file terkirim.`); } catch(e){}
   }
 });
 
-bot.launch().then(() => console.log("🟢 BOT VCARD BERJALAN: METODE FILE LOCAL STABIL"));
+bot.launch().then(() => console.log("🟢 BOT VCARD BERJALAN: SYSTEM ANTI-CRASH AKTIF"));
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
