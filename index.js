@@ -123,7 +123,7 @@ function generateVcardText(numbers, letter) {
 // ===== /start =====
 bot.start(async (ctx) => {
   try {
-    await ctx.reply("✅ Bot siap melayani.\nJalur japri sudah terbuka!\nKetik /vcard <jumlah_file> <isi> di grup.");
+    await ctx.reply("✅ Bot vCard Aktif.\nGas request sudah bisa!\nKetik /vcard <jumlah_file> <isi> di grup.");
   } catch(e) { console.error("Start error", e); }
 });
 
@@ -158,7 +158,7 @@ bot.command("vcard", async (ctx) => {
   }
 
   if (ctx.chat.type !== "private") {
-    try { await ctx.reply(`✅ Permintaan diproses @${user.username || user.first_name}. Silakan cek japri ya!`); } catch(e){}
+    try { await ctx.reply(`⏳ Otw proses ya @${user.username || user.first_name}. Silakan cek japri saya.`); } catch(e){}
   }
 
   const totalNeeded = fileCount * perFile;
@@ -227,7 +227,7 @@ bot.command("vcard", async (ctx) => {
   }
 
   if (successCount === fileCount) {
-    try { await ctx.telegram.sendMessage(user.id, "🎉 *SEMUA FILE SELESAI DIKIRIM!*", { parse_mode: "Markdown" }); } catch(e){}
+    try { await ctx.telegram.sendMessage(user.id, "✅ *DONE SEMUA FILE BERHASIL DIKIRIM!*", { parse_mode: "Markdown" }); } catch(e){}
   } else {
     try { await ctx.telegram.sendMessage(user.id, `⚠️ Selesai, tapi hanya ${successCount} dari ${fileCount} file terkirim.`); } catch(e){}
   }
