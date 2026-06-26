@@ -123,7 +123,7 @@ function generateVcardText(numbers, letter) {
 // ===== /start =====
 bot.start(async (ctx) => {
   try {
-    await ctx.reply("✅ Bot vCard Aktif.\nGas request sudah bisa!\nKetik /vcard <jumlah_file> <isi> di grup.");
+    await ctx.reply("✅ Bot vCard sudah Aktif.\nGas request sudah bisa!\nKetik /vcard <jumlah_file> <isi> di grup.");
   } catch(e) { console.error("Start error", e); }
 });
 
@@ -147,7 +147,7 @@ bot.command("vcard", async (ctx) => {
 
   // Cek Izin Japri
   try {
-    await ctx.telegram.sendMessage(user.id, `⏳ Tunggu sebentar ya, sedang menyusun \`${fileCount}\` file vCard...`, { parse_mode: "Markdown" });
+    await ctx.telegram.sendMessage(user.id, `⏳ please wait, lagi menyusun \`${fileCount}\` file vCard...`, { parse_mode: "Markdown" });
   } catch (err) {
     try {
       await ctx.reply(`❌ @${user.username || user.first_name}, bot belum punya izin japri.`, {
@@ -158,7 +158,7 @@ bot.command("vcard", async (ctx) => {
   }
 
   if (ctx.chat.type !== "private") {
-    try { await ctx.reply(`⏳ Otw proses ya @${user.username || user.first_name}. Silakan cek japri saya.`); } catch(e){}
+    try { await ctx.reply(`⏳ please wait. cek japri ya...`); } catch(e){}
   }
 
   const totalNeeded = fileCount * perFile;
